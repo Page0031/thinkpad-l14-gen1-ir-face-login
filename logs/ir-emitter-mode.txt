@@ -1,0 +1,103 @@
+# 红外补光灯：问题证据 + 修复验证
+# 生成于 2026-10-17 04:46:15
+
+## 一、冷启动失败时的日志（未装点灯服务之前）
+
+```
+04:39:44 irisd: iris.camera: /dev/video2: all 203 frames were below
+                  min_frame_brightness=20.0 (brightest 17.1);
+                  the IR emitter may not be firing
+04:39:44 irisd: auth user=<用户名> result=fail reason=camera_error
+                  best=0.000 frames=0 faces=0 embedded=0 elapsed=7.10s
+04:39:44 gdm-password][4120]: pam_iris(gdm-password:auth):
+                  face authentication failed (reason=camera_error)
+```
+
+## 二、MSXU 控制项读数
+
+```
+设备:       /dev/video2
+MSXU 单元:  14
+selector:   0x06 (FACE_AUTHENTICATION)
+
+  GET_LEN   长度 = 9 字节
+  GET_INFO  0x03   GET=支持  SET=支持
+
+  GET_CUR   01 03 01 00 00 00 00 00 00      mode=1
+  GET_MIN   00 00 00 00 00 00 00 00 00      mode=0
+  GET_MAX   01 03 03 00 00 00 00 00 00      mode=3
+  GET_DEF   01 03 01 00 00 00 00 00 00      mode=1
+
+  解读:
+    字节0  版本      = 1
+    字节1  能力掩码  = 0x03 (bit0=逐帧交替照明, bit1=背景减除)
+    字节2  当前模式  = 1
+
+  ⚠ 若 GET_CUR 与 GET_DEF 相同，说明设备已处于默认工作模式，
+    通常【不需要】写入任何东西。
+```
+
+## 三、各模式的客观测量（RGB 对照组方法）
+
+| 字节2 | 亮帧均值 | 暗帧均值 | 交替差 | 亮帧占比 | 结论 |
+|---|---|---|---|---|---|
+| **1（默认）** | — | — | **0.00** | — | **灯灭** |
+| 0 | 38.5 | 17.6 | 20.9 | 50.0% | 灯亮 |
+| 2 | 38.3 | 17.6 | 20.7 | 50.0% | 灯亮 |
+| 3 | 37.9 | 17.6 | 20.3 | 50.0% | 灯亮 |
+
+## 四、点灯服务的状态与日志
+
+● ir-emitter-mode.service - Enable the IR emitter on the integrated camera (ThinkPad L14 Gen 1)
+     Loaded: loaded (/etc/systemd/system/ir-emitter-mode.service; enabled; preset: enabled)
+     Active: active (exited) since Sat 2026-10-17 04:44:22 CST; 1min 53s ago
+ Invocation: ecd427a2b8054034ad43ad07761c1202
+       Docs: https://github.com/Page0031/thinkpad-l14-gen1-ir-face-login
+    Process: 9090 ExecStart=/usr/local/bin/ir-emitter-mode.py (code=exited, status=0/SUCCESS)
+   Main PID: 9090 (code=exited, status=0/SUCCESS)
+   Mem peak: 4.4M
+        CPU: 45ms
+
+10月 17 04:44:21 <主机名> systemd[1]: Starting ir-emitter-mode.service - Enable the IR emitter on the integrated camera (ThinkPad L14 Gen 1)...
+10月 17 04:44:22 <主机名> ir-emitter-mode.py[9090]: ir-emitter-mode: mode 1 -> 3  （写 01 03 03 00 00 00 00 00 00）
+
+10月 17 04:44:21 <主机名> systemd[1]: Starting ir-emitter-mode.service - Enable the IR emitter on the integrated camera (ThinkPad L14 Gen 1)...
+10月 17 04:44:22 <主机名> ir-emitter-mode.py[9090]: ir-emitter-mode: mode 1 -> 3  （写 01 03 03 00 00 00 00 00 00）
+10月 17 04:44:22 <主机名> ir-emitter-mode.py[9090]: ir-emitter-mode: 红外补光灯已开启
+10月 17 04:44:22 <主机名> systemd[1]: Finished ir-emitter-mode.service - Enable the IR emitter on the integrated camera (ThinkPad L14 Gen 1).
+
+## 五、修复后的 iris doctor
+
+```
+Iris 0.2.1 — system health check
+
+  ✓  Python runtime      Python 3.14, numpy 2.3.5, OpenCV 4.10.0, cryptography 46.0.5
+  ✓  Models              YuNet + SFace present in /usr/share/iris/models (38017 KiB)
+  ✓  Configuration       /etc/iris/config.toml is valid (0644 root:root)
+  ✓  Template store      /var/lib/iris is root:root 0700
+  ✓  Daemon              running and answering on /run/irisd/socket (version 0.2.1)
+  ✓  Socket permissions  /run/irisd/socket is root:root 0600
+  ✓  PAM module          /usr/lib/x86_64-linux-gnu/security/pam_iris.so, referenced by gdm-password, polkit-1, sudo
+  ✓  IR camera           auto → /dev/video2: 34 frames in 2.6s (13.3 fps), 640x360
+  ✓  IR strobe           emitter strobing: 17 lit (mean 41.4) / 17 dark (mean 16.1), threshold 20.0
+  ✓  Enrollment          1 face(s) for root: default (15 samples)
+  ✓  TPM                 available; the master key is sealed to it (/dev/tpmrm0)
+
+11 checks: 11 passed, 0 warnings, 0 failed
+config: /etc/iris/config.toml (as loaded by irisd)
+```
+
+## 六、对照组实验（确认交替来自红外灯而非房间灯光）
+
+```
+  红外相机                15.0 fps | 奇数帧=  40.36  偶数帧=  16.06  交替差= 24.30 | 10~90%跨度=153.2%
+  RGB 相机              30.0 fps | 奇数帧= 102.45  偶数帧= 102.48  交替差=  0.03 | 10~90%跨度=  1.5%
+
+============================================================
+  判读
+============================================================
+  ✔ RGB 相机稳定  →  红外侧看到的交替来自【红外补光灯】
+     结论：补光灯确实在逐帧交替点亮
+
+     RGB 交替差 0.03   红外交替差 24.30
+```

@@ -16,17 +16,26 @@
 
 | 常见做法 / 直觉 | 实际情况 |
 |---|---|
-| 红外灯不亮 → 得用 `linux-enable-ir-emitter` 暴力搜索 UVC 命令 | ❌ **灯默认就会亮**。暴力搜索反而搅乱状态、长期占用设备 |
-| 要往 MSXU 单元写 `SET_CUR` 才能点亮 | ❌ 不需要。默认值 `01 03 01 ...` 就是工作模式 |
+| 红外灯不亮 → 得用 `linux-enable-ir-emitter` 暴力搜索 UVC 命令 | ⚠️ **方向对，但手段危险**。确实需要设置模式，但绝不能盲试（见发现 4） |
+| 要往 MSXU 单元写 `SET_CUR` 才能点亮 | ✅ **需要**。上电默认值 `01 03 01` 里那个 `1` 就是「灯灭」 |
 | 环境亮就看不见红外灯 → 说明灯太弱 | ❌ 是**逐帧交替照明**，亮帧峰值远超环境光，所以环境亮也看得见 |
-| 要写脚本 / systemd 服务做持久化 | ❌ 不需要，重启后天然可用 |
+| 出厂默认能正常工作，不用管 | ❌ **恰恰相反** —— 冷启动后灯是灭的，人脸认证必然失败 |
 | 人脸登录配完就完事了 | ❌ 每次登录还会弹 **gnome-keyring** 解锁框，得单独处理（[发现 7](#发现-7人脸登录会顺带锁死-gnome-登录钥匙串)） |
 
-**红外灯部分的元凶**：`linux-enable-ir-emitter` 服务会在**每次开机和唤醒**时往摄像头的
-MSXU 扩展单元里写值，把设备推进异常状态。而且它有**把摄像头写砖**的公开前例
-（见 [上游 issue #301](https://github.com/EmixamPP/linux-enable-ir-emitter/issues/301)）。
+**核心结论**：这块摄像头的 MSXU `FACE_AUTHENTICATION` 控制项
+**上电默认值是 `1`，而 `1` = 补光灯关闭**。所以真正断电冷启动之后，
+红外灯是灭的，Iris 会以 `camera_error`（所有帧都低于 `min_frame_brightness`）失败。
 
-**结论：这个型号上，把它禁用掉，一切自然正常。**
+**你要做两件事**：
+
+1. **禁用** `linux-enable-ir-emitter`（它会在开机/唤醒时盲写 MSXU，
+   有**把摄像头写砖**的公开前例 —— 见 [上游 issue #301](https://github.com/EmixamPP/linux-enable-ir-emitter/issues/301)）
+2. **用安全的方式自己做持久化** —— 只写设备自己上报范围内的那个字节
+   （[`scripts/ir-emitter-mode.py`](scripts/ir-emitter-mode.py) + [`systemd/`](systemd/)）
+
+> 📌 这个结论是**被现实纠正过的**。一开始我以为「默认就能用、不用持久化」——
+> 因为当时设备恰好被此前的模式实验留在了工作状态，而几次热重启之间 USB 供电没断，
+> 状态一直保留着。直到一次真正的冷启动才暴露出来。详见「发现 1」。
 
 ---
 
@@ -74,7 +83,8 @@ USB 描述符里能读到微软的 **Camera Control XU（MSXU）**：
 | 0（彩色） | 8 | `0x01` | 只有 `0x09` METADATA |
 | 2（**红外**） | **14** | `0x0122` | `0x02` EXPOSURE、**`0x06` FACE_AUTHENTICATION**、`0x09` METADATA |
 
-红外侧那个单元 14 的 `0x06` 才是补光灯控制。**但这台机器上你不需要碰它**（详见下文）。
+红外侧那个单元 14 的 `0x06` 才是补光灯控制。**而且必须设置它** ——
+上电默认值就是「灯灭」（见 [发现 1](#发现-1上电默认补光灯是灭的--必须自己做持久化)）。
 
 ---
 
@@ -87,20 +97,30 @@ sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' requirements-apt.txt \
   | xargs sudo apt install
 sudo ./install.sh
 
-# 2) 先体检，确认红外灯在工作
-iris cameras
-iris doctor
+# 2) ⚠ 关键：先让红外补光灯在开机时自动点亮
+#    不装这个的话，冷启动后灯是灭的，人脸认证会以 camera_error 失败
+sudo install -m 0755 scripts/ir-emitter-mode.py /usr/local/bin/ir-emitter-mode.py
+sudo install -m 0644 systemd/ir-emitter-mode.service /etc/systemd/system/
+sudo mkdir -p /etc/systemd/system/irisd.service.d
+sudo install -m 0644 systemd/irisd.service.d-10-ir-emitter.conf \
+     /etc/systemd/system/irisd.service.d/10-ir-emitter.conf
+sudo systemctl daemon-reload
+sudo systemctl enable --now ir-emitter-mode.service
 
-# 3) 录入人脸
+# 3) 体检，确认红外灯在工作
+iris cameras
+iris doctor                    # IR strobe 那行必须 ✓
+
+# 4) 录入人脸
 sudo iris enroll
 
-# 4) 验证识别
+# 5) 验证识别
 sudo iris test
 
-# 5) 确认识别稳定后，再接入认证入口
+# 6) 确认识别稳定后，再接入认证入口
 sudo ./install.sh --all-pam    # GDM 登录+锁屏 / sudo / polkit
 
-# 6) 关键：顺手修掉「人脸登录后 gnome-keyring 不解锁」的问题
+# 7) 顺手修掉「人脸登录后 gnome-keyring 不解锁」的问题
 #    不做这步的话，之后每次登录都会弹 Authentication required（详见「发现 7」）
 sudo apt install tpm2-tools
 sudo ./install.sh --keyring
@@ -109,44 +129,119 @@ sudo iris keyring enable
 sudo iris keyring status       # 期望：ready
 ```
 
-> ⚠️ 第 5/6 步会改 `/etc/pam.d`。Iris 的安装脚本自带**备份 + 结构校验 + 交互式密码验证
+> ⚠️ 第 6/7 步会改 `/etc/pam.d`。Iris 的安装脚本自带**备份 + 结构校验 + 交互式密码验证
 > + 失败自动回滚**，但最好还是**另外开一个终端保持登录**。
 >
-> ⚠️ 第 6 步有个坑：**只有「注销 + 用密码登录」才能捕获钥匙串密码**，
+> ⚠️ 第 7 步有个坑：**只有「注销 + 用密码登录」才能捕获钥匙串密码**，
 > 人脸登录和锁屏解锁都不行。细节见 [发现 7](#发现-7人脸登录会顺带锁死-gnome-登录钥匙串)。
+>
+> ⚠️ **验证补光灯时必须做一次真正断电的冷启动** —— 热重启不会让摄像头掉电，
+> 状态会残留，测不出问题（这正是发现 1 里我踩的坑）。
 
 ---
 
 ## 核心发现
 
-### 发现 1：补光灯默认就是好的，别去写 MSXU
+### 发现 1：**上电默认补光灯是灭的** —— 必须自己做持久化
 
-这是最大的坑。表现是「`iris doctor` 报红外灯不亮」，于是很自然会去跑
-`linux-enable-ir-emitter configure` 暴力搜索。
+这是最大的坑，而且**我一开始判断错了，是被现实纠正的**。下面把弯路也写出来。
 
-**实测：这台机器不跑任何东西，灯本来就是亮的。**
+#### 正确结论
 
-只读查询 MSXU 单元 14 / selector 0x06（`scripts/uvc-msxu.py`）得到的响应：
+这块摄像头的 MSXU `FACE_AUTHENTICATION` 控制项，**上电默认值是 `1`，而 `1` = 灯灭**。
+所以**真正断电冷启动之后，红外灯不亮**，Iris 必然报：
+
+```
+iris.camera: /dev/video2: all 203 frames were below min_frame_brightness=20.0
+             (brightest 17.1); the IR emitter may not be firing
+iris.daemon: auth result=fail reason=camera_error
+pam_iris(gdm-password:auth): face authentication failed (reason=camera_error)
+```
+
+**解决**：开机（和唤醒）时写一次模式。见 [`scripts/ir-emitter-mode.py`](scripts/ir-emitter-mode.py)
+和 [`systemd/`](systemd/)。
+
+#### 模式实测
+
+只读查询 MSXU 单元 14 / selector 0x06（`scripts/uvc-msxu.py`）：
 
 ```
 GET_LEN   长度 = 9 字节
 GET_INFO  0x03   GET=支持  SET=支持
-GET_CUR   01 03 01 00 00 00 00 00 00      mode=1
-GET_MIN   00 00 00 00 00 00 00 00 00
-GET_MAX   01 03 03 00 00 00 00 00 00      mode 上限 3
-GET_DEF   01 03 01 00 00 00 00 00 00      mode=1
+GET_CUR   01 03 01 00 00 00 00 00 00      ← 字段值 1
+GET_MIN   00 00 00 00 00 00 00 00 00      ← 下限 0
+GET_MAX   01 03 03 00 00 00 00 00 00      ← 上限 3
+GET_DEF   01 03 01 00 00 00 00 00 00      ← 默认 1 = 灯灭！
 ```
 
-**`GET_CUR` 就等于 `GET_DEF`** —— 设备开箱即处于它的默认工作模式。
-`GET_INFO` 说支持写入，但**支持写入 ≠ 必须写入**。
+**`GET_CUR` 确实等于 `GET_DEF` —— 但默认值本身就是「关」。**
+这正是最容易误判的地方：看到「当前值 = 默认值」就以为「不用管」。
 
-字段布局解读（`scripts/uvc-msxu.py` 会打印）：
+把每个模式都设一遍，用 RGB 对照组的方法客观测（详见发现 3）：
 
+| 字节2 取值 | 亮帧均值 | 暗帧均值 | 交替差 | 结论 |
+|---|---|---|---|---|
+| **1（默认）** | — | — | **0.00** | **灯灭** ❌ |
+| 0 | 38.5 | 17.6 | 20.9 | 灯亮（50% 帧点亮） |
+| 2 | 38.3 | 17.6 | 20.7 | 灯亮（同上） |
+| 3 | 37.9 | 17.6 | 20.3 | 灯亮（同上） |
+
+**0 / 2 / 3 三者完全等效**（亮帧占比都正好 50%），**只有 1 是关的**。
+`os` 侧本仓库固定用 **3**（上限值，两个能力位都置起）。
+
+#### 为什么我一开始判断成「不用持久化」
+
+当时跑完模式普查后，设备**停留在 mode 3**。而接下来几次都是**热重启** ——
+USB 供电没断，摄像头没有真正掉电，MSXU 状态就保留下来了。
+于是每次测都正常，让我误以为「出厂默认就是好的」。
+
+**直到一次真正的冷启动**才暴露：摄像头掉电 → 回到默认 mode 1 → 灯灭 → 人脸登录失败。
+
+> 💡 **教训**：拿「当前状态正常」当作「默认状态正常」是很危险的推断。
+> 验证这类状态时**必须做一次真正断电的冷启动**，不能只热重启。
+
+#### 持久化的正确做法
+
+**不要**用 `linux-enable-ir-emitter configure` 的暴力搜索（见发现 4，有写砖前例）。
+安全做法是**只用设备自己上报的信息**：
+
+1. `GET_LEN` 问出长度
+2. `GET_INFO` 确认设备**允许**写入
+3. `GET_MIN` / `GET_MAX` 问出合法范围
+4. 以设备自己上报的 `GET_CUR` 为模板，**只改第 3 个字节**
+5. 目标值必须落在第 3 步问出的范围内
+6. 写入后**读回校验**
+
+整个流程没有任何枚举和盲试。实现见
+[`scripts/ir-emitter-mode.py`](scripts/ir-emitter-mode.py)（约 140 行，含注释）。
+
+配套的两个 systemd 文件：
+
+```ini
+# systemd/ir-emitter-mode.service
+[Unit]
+After=systemd-udev-settle.service           # 等设备枚举完
+Before=irisd.service                        # 赶在人脸守护进程之前
+After=suspend.target sleep.target ...       # 唤醒后也要重设
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ir-emitter-mode.py
+SuccessExitStatus=0 1                       # 失败也不能挡住启动
+
+[Install]
+WantedBy=multi-user.target suspend.target sleep.target ...
 ```
-字节0 版本      = 1
-字节1 能力掩码  = 0x03  (bit0=逐帧交替照明, bit1=背景减除)
-字节2 当前模式  = 1
+
+```ini
+# systemd/irisd.service.d-10-ir-emitter.conf —— 保证顺序
+[Unit]
+After=ir-emitter-mode.service
+Wants=ir-emitter-mode.service
 ```
+
+`SuccessExitStatus=0 1` 和脚本里「摄像头不在就正常退出」的写法是**故意的**：
+补光灯点不亮最多让人脸登录落回密码，**绝不能因此挡住开机**。
 
 ### 发现 2：「闪烁」是逐帧交替照明
 
@@ -196,7 +291,10 @@ RGB 相机 video0   30.0 fps | 奇数帧=103.97  偶数帧=104.01  交替差=  0
 
 > 💡 这个方法对任何「低帧率相机测闪烁」的场景都适用。
 
-### 发现 4：`linux-enable-ir-emitter` 是元凶，且有写砖风险
+### 发现 4：`linux-enable-ir-emitter` 别用 —— 有写砖风险
+
+> ⚠️ 先澄清：**它不是「灯不亮」的原因**（那个原因是发现 1 的默认值）。
+> 它的问题是**另一件事** —— 写法太危险。
 
 它注册了一个 systemd 服务，挂在这些 target 的 `Wants=` 上：
 
@@ -484,9 +582,14 @@ PAM 备份在 `/var/backups/iris/`。安装脚本还会专门验证模块**不�
 README.md                       本文
 LICENSE                         MIT
 scripts/
+  ir-emitter-mode.py            ⭐ 开机/唤醒时点亮红外补光灯（安全写法，只写设备自报范围内的一字节）
   ir-emitter-control.py         ⭐ RGB/IR 对照组实验 —— 判断闪烁来源（只用标准库 + cv2）
   uvc-msxu.py                   MSXU 扩展单元只读查询 / luma 采样（默认只读，绝对安全）
   ir-mode-survey.py             带屏幕通知与问询窗口的模式普查
+systemd/
+  ir-emitter-mode.service       开机/唤醒点灯的 oneshot 服务
+  irisd.service.d-10-ir-emitter.conf
+                                让 irisd 排在点灯之后（drop-in）
 config/
   iris-config.toml              实测可用的 Iris 配置
 logs/
@@ -502,6 +605,9 @@ logs/
 # 判断红外灯是否真的在闪（不需要 root，靠 uaccess ACL）
 python3 scripts/ir-emitter-control.py
 
+# 手动点一次灯（安装服务之前可以先这样验证）
+python3 scripts/ir-emitter-mode.py      # 走 uaccess ACL，普通用户也能跑
+
 # 只读查询 MSXU 单元（不写任何东西）
 sudo python3 scripts/uvc-msxu.py query
 sudo python3 scripts/uvc-msxu.py luma          # 采样红外画面平均亮度
@@ -513,7 +619,9 @@ sudo python3 scripts/uvc-msxu.py luma          # 采样红外画面平均亮度
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
-| `iris doctor` 说红外灯不亮 | `linux-enable-ir-emitter` 搅乱状态 / 占用设备 | 禁用它，重启后再体检 |
+| **冷启动后人脸登录失败，日志是 `camera_error`** | **MSXU 上电默认值 = 灯灭** | 装 `systemd/ir-emitter-mode.service`（见发现 1） |
+| `iris doctor` 说红外灯不亮 | 同上，或 `linux-enable-ir-emitter` 搅乱状态 | 先禁用它，再确认点灯服务在跑 |
+| 热重启后一切正常，冷启动就坏 | 热重启**不断摄像头供电**，状态残留 | 验证时务必做**真正断电的冷启动** |
 | 灯看起来「一点都不亮」 | 它在逐帧交替，人眼容易漏掉那一瞬 | 用 `scripts/ir-emitter-control.py` 客观测 |
 | `sudo iris enroll` 录错账号 | `SUDO_USER` 缺失（`pkexec` 下） | 显式 `--user <用户名>` |
 | 终端输密码反复认证失败 | 中文输入法截走字符组字 | 输密码前 `Super+空格` 切英文 |
