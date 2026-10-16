@@ -1,0 +1,26 @@
+# Iris 钥匙串自动解锁状态
+# 生成于 2026-10-17 03:29:48
+
+## iris keyring status --user <用户名>
+  Keyring auto-unlock for <用户名>: ready
+
+## 保险库目录（空标记 125B -> TPM 密文 204B）
+  total 12
+  drwx------ 2 root root       4096 Oct 17 03:19 .
+  drwx------ 3 root root       4096 Oct 17 03:19 ..
+  -rw------- 1 root root          0 Oct 17 02:59 .lock
+  -rw------- 1 root <用户名>  204 Oct 17 03:19 1000.json
+
+## gdm-password 里新增的两行 optional 钩子
+  7:auth optional pam_iris_keyring.so
+  27:session optional pam_iris_keyring.so
+
+## /var/backups/iris/ 里的 gdm-password 备份
+-rw-r--r-- 1 root root 1320 Mar 20  2026 gdm-password.20261017-021333
+    （接入人脸之前，即最早的原始栈）
+-rw-r--r-- 1 root root 1440 Mar 20  2026 gdm-password.keyring.20261017-025854.5ekFnQ
+    （加 keyring 钩子之前）
+
+## 回滚方法（任一）
+  sudo cp -a /var/backups/iris/gdm-password.20261017-021333 /etc/pam.d/gdm-password
+  sudo iris keyring disable && sudo ./install.sh --uninstall

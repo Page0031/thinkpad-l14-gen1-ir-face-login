@@ -12,7 +12,7 @@
 
 ## 结论速览
 
-配这个东西时，网上的教程和直觉会把你往**三个错误方向**带。以下是这台机器上的实测结论：
+配这个东西时，网上的教程和直觉会把你往**几个错误方向**带。以下是这台机器上的实测结论：
 
 | 常见做法 / 直觉 | 实际情况 |
 |---|---|
@@ -20,8 +20,9 @@
 | 要往 MSXU 单元写 `SET_CUR` 才能点亮 | ❌ 不需要。默认值 `01 03 01 ...` 就是工作模式 |
 | 环境亮就看不见红外灯 → 说明灯太弱 | ❌ 是**逐帧交替照明**，亮帧峰值远超环境光，所以环境亮也看得见 |
 | 要写脚本 / systemd 服务做持久化 | ❌ 不需要，重启后天然可用 |
+| 人脸登录配完就完事了 | ❌ 每次登录还会弹 **gnome-keyring** 解锁框，得单独处理（[发现 7](#发现-7人脸登录会顺带锁死-gnome-登录钥匙串)） |
 
-**真正的元凶**：`linux-enable-ir-emitter` 服务会在**每次开机和唤醒**时往摄像头的
+**红外灯部分的元凶**：`linux-enable-ir-emitter` 服务会在**每次开机和唤醒**时往摄像头的
 MSXU 扩展单元里写值，把设备推进异常状态。而且它有**把摄像头写砖**的公开前例
 （见 [上游 issue #301](https://github.com/EmixamPP/linux-enable-ir-emitter/issues/301)）。
 
@@ -98,10 +99,21 @@ sudo iris test
 
 # 5) 确认识别稳定后，再接入认证入口
 sudo ./install.sh --all-pam    # GDM 登录+锁屏 / sudo / polkit
+
+# 6) 关键：顺手修掉「人脸登录后 gnome-keyring 不解锁」的问题
+#    不做这步的话，之后每次登录都会弹 Authentication required（详见「发现 7」）
+sudo apt install tpm2-tools
+sudo ./install.sh --keyring
+sudo iris keyring enable
+# 然后注销，用【密码】登录一次 GDM 以捕获钥匙串密码，再：
+sudo iris keyring status       # 期望：ready
 ```
 
-> ⚠️ 第 5 步会改 `/etc/pam.d`。Iris 的安装脚本自带**备份 + 结构校验 + 交互式密码验证
+> ⚠️ 第 5/6 步会改 `/etc/pam.d`。Iris 的安装脚本自带**备份 + 结构校验 + 交互式密码验证
 > + 失败自动回滚**，但最好还是**另外开一个终端保持登录**。
+>
+> ⚠️ 第 6 步有个坑：**只有「注销 + 用密码登录」才能捕获钥匙串密码**，
+> 人脸登录和锁屏解锁都不行。细节见 [发现 7](#发现-7人脸登录会顺带锁死-gnome-登录钥匙串)。
 
 ---
 
@@ -268,6 +280,121 @@ sudo iris enroll --user <你的用户名>
 | 你的账号 | GDM 登录、锁屏解锁 | 你的账号 |
 | `root` | `sudo`、polkit | `root` |
 
+### 发现 7：人脸登录会「顺带锁死」GNOME 登录钥匙串
+
+**这是整个流程里最容易卡住、也最少被文档提及的一步。**
+
+配好人脸登录、重启之后，每次进桌面都会弹这个框：
+
+> **Authentication required**
+> The login keyring did not get unlocked when you logged into your computer.
+
+#### 为什么会这样
+
+`gnome-keyring` 的登录钥匙串**不是独立密码**，它的加密密钥是从**你的登录密码**派生出来的。
+负责把密码交给它的是 `pam_gnome_keyring.so`：
+
+```
+auth  [success=done default=ignore]  pam_iris.so            ← 人脸，短路点
+@include common-auth                                        ← 密码
+auth  optional  pam_gnome_keyring.so                        ← 解开钥匙串 ← 被跳过
+```
+
+`success=done` 的语义是「**认证到此为止，后面的模块全部不执行**」。
+所以人脸一通过，PAM 立刻返回成功，**`pam_gnome_keyring.so` 根本轮不到运行** ——
+钥匙串拿不到密码，就没被解。
+
+> 💡 `Windows Hello` 没有这个问题，是因为它走的是 DPAPI + TPM 的另一套体系，
+> 钥匙串密钥不依赖登录密码。**任何「不经过密码的生物识别登录」在 Linux 上都会撞到这一堵墙。**
+
+#### 解法：用 TPM 把密码封存起来
+
+Iris 专门做了这个功能 —— 把登录密码用 TPM 2.0 封存，人脸登录时再解出来交给 Keyring：
+
+```bash
+sudo apt install tpm2-tools          # 额外依赖
+sudo ./install.sh --keyring          # 给 gdm-password 加两行 optional 钩子
+sudo iris keyring enable             # 按用户开启 -> 状态 pending-password-login
+```
+
+装完 `gdm-password` 会变成：
+
+```
+auth     [success=done default=ignore]  pam_iris.so
+@include common-auth
+auth     optional  pam_iris_keyring.so        ← 新增：捕获密码
+auth     optional  pam_gnome_keyring.so
+...
+session  optional  pam_iris_keyring.so        ← 新增：会话打开时保存/释放
+session  optional  pam_gnome_keyring.so auto_start
+```
+
+两行都是 **`optional`** —— 它出问题也**不可能挡住登录**，最坏就是退回弹框。
+
+#### ⚠️ 关键：必须是「非人脸的真实登录」才能捕获密码
+
+读一下 `pam/pam_iris_keyring.c` 就明白为什么：
+
+```c
+int pam_sm_authenticate(...)     // auth 阶段：把 PAM_AUTHTOK 暂存进 PAM data
+int pam_sm_open_session(...)     // ★ 只有【会话打开】时才真正落库
+{
+    if (face)          → helper("unlock")   // 释放已存密码给钥匙串
+    else if (captured) → helper("capture")  // 保存这次输入的密码
+}
+```
+
+由此推出三条**反直觉的结论**：
+
+| 你可能以为 | 实际 |
+|---|---|
+| 人脸登录会顺便把密码存下来 | ❌ 人脸走的是 `unlock` 分支，**永远不保存** |
+| 锁屏解锁时输密码就行 | ❌ 锁屏**不触发 `open_session`**，暂存的密码会被丢弃 |
+| 用 `sudo` 输密码也行 | ❌ `service` 字段硬编码为 `gdm-password`，其它 PAM 服务不参与 |
+
+**只有「注销 + 用密码重新登录 GDM」这一条路。** 而且保存前会校验密码是否匹配账号当前哈希。
+
+#### 正确操作顺序
+
+```bash
+# ① 先临时关掉人脸，逼出确定性的密码登录
+sudo iris config set auth.enabled false
+
+# ② 注销 -> 在 GDM 输入密码登录（会直接要密码，不会扫脸）
+
+# ③ 确认已经落库
+sudo iris keyring status          # pending-password-login -> ready
+sudo ls -la /var/lib/iris/keyring/    # 空标记 125 字节 -> 密文 ~204 字节
+
+# ④ ⚠ 步：把人脸开回来
+sudo iris config set auth.enabled true
+
+# ⑤ 再注销一次，这次用人脸登录，确认不再弹框
+```
+
+> 第 ④ 步很容易忘 —— `auth.enabled false` 是**全局**关闭，
+> 挂在那里的时候 `sudo`、锁屏、登录全都只能输密码。
+
+#### 一个无法用代码绕过的限制
+
+Iris 保存的是**你登录时输入的那个密码**，并且只在「它匹配账号当前密码哈希」时才存。
+它**无法验证**钥匙串自身的密码是否和登录密码一致。文档原话：
+
+> The helper cannot verify that a separately configured keyring password matches your
+> login password. If they differ, the standard keyring prompt remains.
+
+如果你以前改过账号密码，钥匙串可能还是旧密码建的 —— 那这个方案解决不了，
+得先用 Seahorse 把钥匙串密码改成登录密码（会需要重新保存已存的密钥）。
+
+#### 安全边界（值得知道）
+
+- 密码用 TPM 2.0 封存（`/var/lib/iris/keyring/`，目录 `0700`、文件 `0600`），
+  密钥由 Iris 已有的 TPM 主密钥派生，绑定用户名 + UID + 当前密码哈希
+- 明文密码只在内存和私有管道里，**不落盘、不进命令行/环境变量、不写日志**
+- **但**：这是**设备绑定存储，不是硬件强制的活体检测**。
+  root 可以解封，攻击者控制的系统也能解封；成功的照片/面具欺骗可能连带泄露钥匙串
+- **保存的就是你的账号密码本身**，接受不了就别开这个功能
+
 ---
 
 ## 排查过程：模式普查
@@ -366,6 +493,7 @@ logs/
   iris-doctor.txt               11 项全绿的体检输出
   hardware-report.md            iris hardware-report 原始输出
   video-device-acl.txt          /dev/video2 的权限与 ACL
+  keyring-status.txt            钥匙串自动解锁的核对证据 + 回滚方法
 ```
 
 脚本用法：
@@ -390,6 +518,9 @@ sudo python3 scripts/uvc-msxu.py luma          # 采样红外画面平均亮度
 | `sudo iris enroll` 录错账号 | `SUDO_USER` 缺失（`pkexec` 下） | 显式 `--user <用户名>` |
 | 终端输密码反复认证失败 | 中文输入法截走字符组字 | 输密码前 `Super+空格` 切英文 |
 | 戴眼镜识别不稳 | 只录了不戴眼镜的样本 | 再录一份：`sudo iris enroll glasses` |
+| **每次登录都弹 `Authentication required`** | `pam_iris.so` 的 `success=done` 短路了 PAM，`pam_gnome_keyring.so` 没跑 | `install.sh --keyring` + `iris keyring enable`，**再用密码登录一次**（见发现 7） |
+| `iris keyring status` 一直是 `pending` | 用的人脸登录或锁屏解锁 —— 两者都不触发会话打开 | 关掉人脸 → **注销** → 用密码登录 |
+| 关掉人脸后忘了开回来 | `auth.enabled false` 是全局的 | `sudo iris config set auth.enabled true` |
 
 ---
 
