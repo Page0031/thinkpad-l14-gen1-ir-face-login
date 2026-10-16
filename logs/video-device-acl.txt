@@ -1,0 +1,10 @@
+crw-rw----+ 1 root video 81, 2 Oct 17 02:21 /dev/video2
+# file: /dev/video2
+# owner: root
+# group: video
+user::rw-
+user:<你的用户名>:rw-
+group::rw-
+mask::rw-
+other::---
+

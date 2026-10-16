@@ -1,0 +1,16 @@
+Iris 0.2.1 — system health check
+
+  ✓  Python runtime      Python 3.14, numpy 2.3.5, OpenCV 4.10.0, cryptography 46.0.5
+  ✓  Models              YuNet + SFace present in /usr/share/iris/models (38017 KiB)
+  ✓  Configuration       /etc/iris/config.toml is valid (0644 root:root)
+  ✓  Template store      /var/lib/iris is root:root 0700
+  ✓  Daemon              running and answering on /run/irisd/socket (version 0.2.1)
+  ✓  Socket permissions  /run/irisd/socket is root:root 0600
+  ✓  PAM module          /usr/lib/x86_64-linux-gnu/security/pam_iris.so, referenced by gdm-password, polkit-1, sudo
+  ✓  IR camera           auto → /dev/video2: 34 frames in 2.6s (13.3 fps), 640x360
+  ✓  IR strobe           emitter strobing: 17 lit (mean 54.7) / 17 dark (mean 16.0), threshold 20.0
+  ✓  Enrollment          1 face(s) for root: default (15 samples)
+  ✓  TPM                 available; the master key is sealed to it (/dev/tpmrm0)
+
+11 checks: 11 passed, 0 warnings, 0 failed
+config: /etc/iris/config.toml (as loaded by irisd)

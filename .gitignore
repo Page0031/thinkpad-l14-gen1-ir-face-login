@@ -1,0 +1,31 @@
+# ── 采样图片（体积大，可重新生成）──
+ir-frames/
+*.png
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── 人脸模板 / 密钥：绝对不能提交 ──
+*.enc
+*.key
+master.key*
+
+# ── 编辑器 / 系统 ──
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+
+# ── 注意 ──
+# 下面这些【要】提交，不要加进忽略列表：
+#   logs/iris-doctor.txt     11 项全绿的体检输出（核心证据）
+#   logs/hardware-report.md  相机硬件报告
+#   logs/video-device-acl.txt 权限与 ACL 证据
+#   config/iris-config.toml  实测可用的配置
+#   scripts/*.py             排查脚本
