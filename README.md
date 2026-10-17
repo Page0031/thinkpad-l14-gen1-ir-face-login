@@ -220,17 +220,20 @@ USB 供电没断，摄像头没有真正掉电，MSXU 状态就保留下来了�
 ```ini
 # systemd/ir-emitter-mode.service
 [Unit]
-After=systemd-udev-settle.service           # 等设备枚举完
 Before=irisd.service                        # 赶在人脸守护进程之前
-After=suspend.target sleep.target ...       # 唤醒后也要重设
+# 这几个 target 一激活就重新执行 —— 唤醒后摄像头会被 reset，状态丢失
+After=suspend.target sleep.target hybrid-sleep.target \
+      hibernate.target suspend-then-hibernate.target
+
 [Service]
 Type=oneshot
-RemainAfterExit=yes
+# ⚠ 这里【绝不能】写 RemainAfterExit=yes，理由见下
 ExecStart=/usr/local/bin/ir-emitter-mode.py
 SuccessExitStatus=0 1                       # 失败也不能挡住启动
 
 [Install]
-WantedBy=multi-user.target suspend.target sleep.target ...
+WantedBy=multi-user.target suspend.target sleep.target \
+         hybrid-sleep.target hibernate.target suspend-then-hibernate.target
 ```
 
 ```ini
@@ -242,6 +245,39 @@ Wants=ir-emitter-mode.service
 
 `SuccessExitStatus=0 1` 和脚本里「摄像头不在就正常退出」的写法是**故意的**：
 补光灯点不亮最多让人脸登录落回密码，**绝不能因此挡住开机**。
+
+#### ⚠️ 第二个坑：`RemainAfterExit=yes` 会让唤醒后彻底失效
+
+这是我在第一版里踩的坑，而且是从 `linux-enable-ir-emitter` 的 unit 里照抄来的。
+
+`RemainAfterExit=yes` 的语义是「**跑完后继续假装自己是 active**」。本意是让 oneshot
+在 `systemctl status` 里显示成绿色的 active，看起来很舒服。但副作用是：
+
+> 下次 `suspend.target` 再被激活时，systemd 一看这个 unit **已经是 active 状态**，
+> 就直接跳过 —— **`ExecStart` 根本不会再执行**。
+
+表现就是：开机时灯亮得好好的，合盖唤醒之后灯就再也没亮过，而且日志里
+**连一行错误都没有**（因为压根没运行，不是运行失败）。
+
+```
+$ systemctl show ir-emitter-mode.service -p ActiveState -p RemainAfterExit
+ActiveState=active      # ← 从 14:39 一直挂到 17:04 唤醒之后
+RemainAfterExit=yes
+```
+
+去掉 `RemainAfterExit=yes` 之后，unit 跑完会变成 `inactive (dead)`，
+下次 target 激活时就能正常再执行一次：
+
+```
+ActiveState=inactive
+SubState=dead
+RemainAfterExit=no
+```
+
+> 💡 顺带一个结论：**不能用 udev 规则替代这个钩子**。
+> 实测唤醒时摄像头走的是 USB **reset**（`usb 4-3: reset high-speed USB device`），
+> 不是重新枚举 —— `/dev/video2` 的 inode 和 ctime 都不变，
+> udev 的 `add` 事件不会触发。所以 `suspend.target` 钩子是唯一可靠的路径。
 
 ### 发现 2：「闪烁」是逐帧交替照明
 
@@ -622,6 +658,7 @@ sudo python3 scripts/uvc-msxu.py luma          # 采样红外画面平均亮度
 | **冷启动后人脸登录失败，日志是 `camera_error`** | **MSXU 上电默认值 = 灯灭** | 装 `systemd/ir-emitter-mode.service`（见发现 1） |
 | `iris doctor` 说红外灯不亮 | 同上，或 `linux-enable-ir-emitter` 搅乱状态 | 先禁用它，再确认点灯服务在跑 |
 | 热重启后一切正常，冷启动就坏 | 热重启**不断摄像头供电**，状态残留 | 验证时务必做**真正断电的冷启动** |
+| **合盖唤醒后人脸又用不了** | unit 里写了 `RemainAfterExit=yes`，导致唤醒时不再重跑 | 去掉它（见发现 1 的第二个坑） |
 | 灯看起来「一点都不亮」 | 它在逐帧交替，人眼容易漏掉那一瞬 | 用 `scripts/ir-emitter-control.py` 客观测 |
 | `sudo iris enroll` 录错账号 | `SUDO_USER` 缺失（`pkexec` 下） | 显式 `--user <用户名>` |
 | 终端输密码反复认证失败 | 中文输入法截走字符组字 | 输密码前 `Super+空格` 切英文 |

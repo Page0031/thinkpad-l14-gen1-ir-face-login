@@ -1,16 +1,16 @@
 [Unit]
 Description=Enable the IR emitter on the integrated camera (ThinkPad L14 Gen 1)
 Documentation=https://github.com/Page0031/thinkpad-l14-gen1-ir-face-login
-# 设备出现后再跑；并在 irisd 之前，保证 GDM 第一次扫脸时灯已经亮着
-After=systemd-udev-settle.service
-Wants=systemd-udev-settle.service
+# 赶在人脸守护进程之前
 Before=irisd.service
-# 唤醒后也要重设（摄像头掉电会丢失该状态）
+# 唤醒和休眠相关的 target 一激活就跑。注意这里【不能】用
+# RemainAfterExit=yes —— 那会让 unit 跑完后一直保持 active，
+# 下次 target 再激活时 systemd 认为它"已经在跑"，不会重新执行 ExecStart，
+# 于是合盖唤醒后补光灯就再也不会被点上。
 After=suspend.target sleep.target hybrid-sleep.target hibernate.target suspend-then-hibernate.target
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
 ExecStart=/usr/local/bin/ir-emitter-mode.py
 # 非关键路径：摄像头缺失或写入失败也不能挡住启动
 SuccessExitStatus=0 1
